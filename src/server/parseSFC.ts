@@ -1,9 +1,9 @@
-const fs = require('fs').promises
-const { parse } = require('@vue/compiler-sfc')
+import { promises as fs } from 'fs'
+import { parse } from '@vue/compiler-sfc'
 
 const cache = new Map()
 
-exports.parseSFC = async (filename, saveCache = false) => {
+export async function parseSFC(filename: string, saveCache = false) {
   const content = await fs.readFile(filename, 'utf-8')
   const { descriptor, errors } = parse(content, { // descriptor 可以去查看vue compiler-sfc的包 过程是AST 转换 VUE模式的AST style script template filename
     filename
