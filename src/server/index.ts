@@ -1,2 +1,2 @@
-export { createServer, ServerConfig } from "./server"
-let a = "a"
+export { createServer, ServerConfig } from './server'
+let a = 'a'
