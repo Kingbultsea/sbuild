@@ -1,7 +1,8 @@
+.idea
 .DS_Store
 node_modules
 dist
 TODOs.md
 playground
 *.log
-.idea
+test/temp
