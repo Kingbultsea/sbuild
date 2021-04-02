@@ -33,15 +33,22 @@ afterAll(async () => {
 
 test('test', async () => {
   server = execa(path.resolve(__dirname, '../bin/vds.js'), {
+    // 指定运行该子进程的工作目录
+    // 在hmrWatcher中process.cwd() 读到该路径，表示监听该文件下的内容
     cwd: tempDir
   })
   await new Promise((resolve) => {
+    // Check whether the text output from the monitoring console contains
+    // running, and if there is, it means that the HTTP service is running
+    // 监听控制台输出的文字是否包含Running, 有则代表HTTP服务运行
     server.stdout.on('data', (data) => {
       if (data.toString().match('Running')) {
         resolve()
       }
     })
   })
+
+  debugger
 
   browser = await puppeteer.launch()
 
@@ -75,4 +82,6 @@ test('test', async () => {
       await timeout(200)
     }
   }
+
+  await timeout(99000)
 })

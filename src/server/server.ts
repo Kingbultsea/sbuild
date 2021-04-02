@@ -44,6 +44,7 @@ export async function createServer({ port = 3000 }: ServerConfig = {}): Promise<
       }
     }
 
+    // 访问localhost:3000 即可访问到index.html内容
     serve(req, res, {
       rewrites: [{ source: '**', destination: '/index.html' }]
     })
