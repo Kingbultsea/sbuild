@@ -15,6 +15,8 @@ export interface ServerConfig {
   cwd?: string
 }
 
+let a = 'ff'
+
 export async function createServer({ port = 3000 }: ServerConfig = {}): Promise<
   Server
 > {
