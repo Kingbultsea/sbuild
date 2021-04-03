@@ -1,6 +1,7 @@
 import path from 'path'
 import chokidar from 'chokidar'
 import { parseSFC } from './vueCompiler'
+// @ts-ignore
 import hash_sum from 'hash-sum'
 import { SFCBlock } from '@vue/compiler-sfc'
 
