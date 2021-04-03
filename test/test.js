@@ -84,5 +84,6 @@ test('test', async () => {
     }
   }
 
-  await timeout(99000)
+  // TODO test style HMR
+  // TODO test node_modules resolution
 })
