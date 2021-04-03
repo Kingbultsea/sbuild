@@ -33,9 +33,9 @@ afterAll(async () => {
 })
 
 test('test', async () => {
-  server = execa(path.resolve(__dirname, '../bin/vds.js'), {
-    // 指定运行该子进程的工作目录
-    // 在hmrWatcher中process.cwd() 读到该路径，表示监听该文件下的内容
+  // 指定运行该子进程的工作目录
+  // 在hmrWatcher中process.cwd() 读到该路径，表示监听该文件下的内容
+  server = execa(path.resolve(__dirname, '../bin/vite.js'), {
     cwd: tempDir
   })
   await new Promise((resolve) => {
