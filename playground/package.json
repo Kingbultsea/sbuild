@@ -1,7 +1,13 @@
 {
   "scripts": {
-    "dev": "DEBUG=vite:* vite --jsx-factory=h --open",
-    "build": "DEBUG=vite:* vite build --jsx-factory=h",
+    "dev": "vite --debug",
+    "build": "vite build --debug",
     "serve": "serve dist"
+  },
+  "dependencies": {
+    "lodash-es": "link:../node_modules/lodash-es",
+    "moment": "link:../node_modules/moment",
+    "rewrite-optimized-test-package": "link:./rewrite-optimized/test-package",
+    "conditional-exports": "link:./conditional-exports"
   }
 }

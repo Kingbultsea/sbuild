@@ -1,56 +1,36 @@
 import { Plugin } from 'rollup'
-import { hmrClientId } from '../server/serverPluginHmr'
-import { InternalResolver } from '../resolver'
+import fs from 'fs-extra'
 import { resolveVue } from '../utils/resolveVue'
-import { resolveWebModule } from '../server/serverPluginModuleResolve'
+import { InternalResolver } from '../resolver'
 
 const debug = require('debug')('vite:build:resolve')
 
 export const createBuildResolvePlugin = (
   root: string,
-  cdn: boolean,
-  srcRoots: string[],
   resolver: InternalResolver
 ): Plugin => {
   return {
     name: 'vite:resolve',
-    async resolveId(id: string) {
-      if (id === hmrClientId) {
-        return hmrClientId
-      } else if (id.startsWith('/')) {
-        // if id starts with any of the src root directories, it's a file request
-        if (srcRoots.some((root) => id.startsWith(root))) {
-          return
-        }
-        const resolved = resolver.requestToFile(id)
-        debug(id, `-->`, resolved)
-        return resolved
-      } else if (id === 'vue') {
-        if (!cdn) {
-          return resolveVue(root).bundler
-        } else {
-          return {
-            id: resolveVue(root).cdnLink,
-            external: true
-          }
-        }
-      } else if (!id.startsWith('.')) {
-        const request = resolver.idToRequest(id)
-        if (request) {
-          const resolved = resolver.requestToFile(request)
-          debug(id, `-->`, request, `--> `, resolved)
-          return resolved
-        } else {
-          const webModulePath = await resolveWebModule(root, id)
-          if (webModulePath) {
-            return webModulePath
-          }
+    async resolveId(id, importer) {
+      const original = id
+      id = resolver.alias(id) || id
+      if (id === 'vue' || id.startsWith('@vue/')) {
+        const vuePaths = resolveVue(root)
+        if (id in vuePaths) {
+          return (vuePaths as any)[id]
         }
       }
-    },
-    load(id: string) {
-      if (id === hmrClientId) {
-        return `export const hot = {accept(){},on(){}}`
+      if (id.startsWith('/') && !id.startsWith(root)) {
+        const resolved = resolver.requestToFile(id)
+        if (fs.existsSync(resolved)) {
+          debug(id, `-->`, resolved)
+          return resolved
+        }
+      }
+      // fallback to node-resolve because alias
+      if (id !== original) {
+        const resolved = await this.resolve(id, importer, { skipSelf: true })
+        return resolved || { id }
       }
     }
   }

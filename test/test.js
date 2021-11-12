@@ -2,6 +2,7 @@ const fs = require('fs-extra')
 const path = require('path')
 const execa = require('execa')
 const puppeteer = require('puppeteer')
+const moment = require('moment')
 
 jest.setTimeout(100000)
 
@@ -9,11 +10,12 @@ const timeout = (n) => new Promise((r) => setTimeout(r, n))
 
 const binPath = path.resolve(__dirname, '../bin/vite.js')
 const fixtureDir = path.join(__dirname, '../playground')
-const tempDir = path.join(__dirname, 'temp')
+const tempDir = path.join(__dirname, '../temp')
 let devServer
 let browser
 let page
-const logs = []
+const browserLogs = []
+const serverLogs = []
 
 const getEl = async (selectorOrEl) => {
   return typeof selectorOrEl === 'string'
@@ -36,7 +38,10 @@ beforeAll(async () => {
   try {
     await fs.remove(tempDir)
   } catch (e) {}
-  await fs.copy(fixtureDir, tempDir)
+  await fs.copy(fixtureDir, tempDir, {
+    filter: (file) => !/dist|node_modules/.test(file)
+  })
+  await execa('yarn', { cwd: tempDir })
 })
 
 afterAll(async () => {
@@ -49,6 +54,8 @@ afterAll(async () => {
       forceKillAfterTimeout: 2000
     })
   }
+  // console.log(browserLogs)
+  // console.log(serverLogs)
 })
 
 describe('vite', () => {
@@ -66,24 +73,41 @@ describe('vite', () => {
     })
 
     test('should generate correct asset paths', async () => {
-      const has404 = logs.some((msg) => msg.match('404'))
+      const has404 = browserLogs.some((msg) => msg.match('404'))
       if (has404) {
-        console.log(logs)
+        console.log(browserLogs)
       }
       expect(has404).toBe(false)
     })
 
+    test('asset import from js', async () => {
+      expect(await getText('.asset-import')).toMatch(
+        isBuild
+          ? // hashed in production
+            /\/_assets\/testAssets\.([\w\d]+)\.png$/
+          : // only resolved to absolute in dev
+            '/testAssets.png'
+      )
+    })
+
     test('env variables', async () => {
       expect(await getText('.dev')).toMatch(`__DEV__: ${!isBuild}`)
-      expect(await getText('.node_env')).toMatch(
+      expect(await getText('.base')).toMatch(`process.env.BASE_URL: /`)
+      expect(await getText('.node-env')).toMatch(
         `process.env.NODE_ENV: ${isBuild ? 'production' : 'development'}`
+      )
+      expect(await getText('.custom-env-variable')).toMatch(
+        'process.env.CUSTOM_ENV_VARIABLE: 9527'
       )
     })
 
     test('module resolving', async () => {
       expect(await getText('.module-resolve-router')).toMatch('ok')
       expect(await getText('.module-resolve-store')).toMatch('ok')
-      expect(await getText('.module-resolve-web')).toMatch('ok')
+      expect(await getText('.module-resolve-optimize')).toMatch('ok')
+      expect(await getText('.module-resolve-conditional')).toMatch('ok')
+      expect(await getText('.index-resolve')).toMatch('ok')
+      expect(await getText('.dot-resolve')).toMatch('ok')
     })
 
     if (!isBuild) {
@@ -116,11 +140,46 @@ describe('vite', () => {
         await expectByPolling(() => getText('.hmr-propagation'), '666')
       })
 
-      test('hmr (manual API)', async () => {
+      test('hmr (manual API, self accepting)', async () => {
         await updateFile('testHmrManual.js', (content) =>
           content.replace('foo = 1', 'foo = 2')
         )
-        await expectByPolling(() => logs[logs.length - 1], 'foo is now:  2')
+        await expectByPolling(
+          () => browserLogs[browserLogs.length - 1],
+          'js module hot updated:  /testHmrManual.js'
+        )
+        expect(
+          browserLogs.slice(browserLogs.length - 4, browserLogs.length - 1)
+        ).toEqual([
+          `foo was: 1`,
+          `(self-accepting)1.foo is now: 2`,
+          `(self-accepting)2.foo is now: 2`
+        ])
+      })
+
+      test('hmr (manual API, accepting deps)', async () => {
+        browserLogs.length = 0
+        await updateFile('testHmrManualDep.js', (content) =>
+          content.replace('foo = 1', 'foo = 2')
+        )
+        await expectByPolling(
+          () => browserLogs[browserLogs.length - 1],
+          'js module hot updated:  /testHmrManual.js'
+        )
+        expect(
+          browserLogs.slice(browserLogs.length - 8, browserLogs.length - 1)
+        ).toEqual([
+          // dispose for both dep and self
+          `foo was: 2`,
+          `(dep) foo was: 1`,
+          `(dep) foo from dispose: 10`,
+          // self callbacks
+          `(self-accepting)1.foo is now: 2`,
+          `(self-accepting)2.foo is now: 2`,
+          // dep callbacks
+          `(single dep) foo is now: 2`,
+          `(multiple deps) foo is now: 2`
+        ])
       })
     }
 
@@ -159,7 +218,7 @@ describe('vite', () => {
       }
     })
 
-    test('<style module>', async () => {
+    test('SFC <style module>', async () => {
       const el = await page.$('.css-modules-sfc')
       expect(await getComputedColor(el)).toBe('rgb(0, 0, 255)')
       if (!isBuild) {
@@ -204,7 +263,7 @@ describe('vite', () => {
       }
     })
 
-    test('sfc src imports', async () => {
+    test('SFC src imports', async () => {
       expect(await getText('.src-imports-script')).toMatch('src="./script.ts"')
       const el = await getEl('.src-imports-style')
       expect(await getComputedColor(el)).toBe('rgb(119, 136, 153)')
@@ -221,7 +280,7 @@ describe('vite', () => {
         await expectByPolling(() => getText('.src-imports-script'), 'bye from')
         // template
         await updateFile('src-import/template.html', (c) =>
-          c.replace('{{ msg }}', 'changed')
+          c.replace('{{ msg }}', '{{ msg }} changed')
         )
         await expectByPolling(() => getText('.src-imports-script'), 'changed')
       }
@@ -255,8 +314,8 @@ describe('vite', () => {
 
     test('jsx', async () => {
       const text = await getText('.jsx-root')
-      expect(text).toMatch('from Preact')
-      expect(text).toMatch('from TSX')
+      expect(text).toMatch('from Preact JSX')
+      expect(text).toMatch('from Preact TSX')
       expect(text).toMatch('count is 1337')
       if (!isBuild) {
         await updateFile('testJsx.jsx', (c) => c.replace('1337', '2046'))
@@ -264,24 +323,76 @@ describe('vite', () => {
       }
     })
 
+    test('alias', async () => {
+      expect(await getText('.alias')).toMatch('alias works')
+      expect(await getText('.dir-alias')).toMatch('directory alias works')
+      expect(await getText('.dir-alias-index')).toMatch(
+        'directory alias index works'
+      )
+      if (!isBuild) {
+        await updateFile('aliased/index.js', (c) =>
+          c.replace('works', 'hmr works')
+        )
+        await expectByPolling(() => getText('.alias'), 'alias hmr works')
+        await updateFile('aliased-dir/named.js', (c) =>
+          c.replace('works', 'hmr works')
+        )
+        await expectByPolling(
+          () => getText('.dir-alias'),
+          'directory alias hmr works'
+        )
+        await updateFile('aliased-dir/index.js', (c) =>
+          c.replace('works', 'hmr works')
+        )
+        await expectByPolling(
+          () => getText('.dir-alias-index'),
+          'directory alias index hmr works'
+        )
+      }
+    })
+
+    test('transforms', async () => {
+      const el = await getEl('.transform-scss')
+      expect(await getComputedColor(el)).toBe('rgb(0, 255, 255)')
+      expect(await getText('.transform-js')).toBe('2')
+      if (!isBuild) {
+        await updateFile('testTransform.scss', (c) =>
+          c.replace('cyan', 'rgb(0, 0, 0)')
+        )
+        await expectByPolling(() => getComputedColor(el), 'rgb(0, 0, 0)')
+        await updateFile('testTransform.js', (c) => c.replace('= 1', '= 2'))
+        await expectByPolling(() => getText('.transform-js'), '3')
+      }
+    })
+
     test('async component', async () => {
       await expectByPolling(() => getText('.async'), 'should show up')
+      expect(await getComputedColor('.async')).toBe('rgb(139, 69, 19)')
+    })
+
+    test('rewrite import in optimized deps', async () => {
+      expect(await getText('.test-rewrite-in-optimized')).toMatch(
+        moment(1590231082886).format('MMMM Do YYYY, h:mm:ss a')
+      )
     })
   }
 
   // test build first since we are going to edit the fixtures when testing dev
   describe('build', () => {
     let staticServer
-    afterAll(() => {
-      if (staticServer) staticServer.close()
-    })
-
-    test('should build without error', async () => {
-      const buildOutput = await execa(binPath, ['build', '--jsx-factory=h'], {
+    beforeAll(async () => {
+      console.log('building...')
+      const buildOutput = await execa(binPath, ['build'], {
         cwd: tempDir
       })
       expect(buildOutput.stdout).toMatch('Build completed')
       expect(buildOutput.stderr).toBe('')
+      console.log('build complete. running build tests...')
+    })
+
+    afterAll(() => {
+      console.log('build test done.')
+      if (staticServer) staticServer.close()
     })
 
     describe('assertions', () => {
@@ -298,29 +409,115 @@ describe('vite', () => {
 
       declareTests(true)
     })
+
+    test('css codesplit in async chunks', async () => {
+      const colorToMatch = /#8B4513/i // from TestAsync.vue
+
+      const files = await fs.readdir(path.join(tempDir, 'dist/_assets'))
+      const cssFile = files.find((f) => f.endsWith('.css'))
+      const css = await fs.readFile(
+        path.join(tempDir, 'dist/_assets', cssFile),
+        'utf-8'
+      )
+      // should be extracted from the main css file
+      expect(css).not.toMatch(colorToMatch)
+      // should be inside the split chunk file
+      const asyncChunk = files.find(
+        (f) => f.startsWith('TestAsync') && f.endsWith('.js')
+      )
+      const code = await fs.readFile(
+        path.join(tempDir, 'dist/_assets', asyncChunk),
+        'utf-8'
+      )
+      // should be inside the async chunk
+      expect(code).toMatch(colorToMatch)
+    })
   })
 
   describe('dev', () => {
     beforeAll(async () => {
-      logs.length = 0
+      browserLogs.length = 0
+      console.log('starting dev server...')
       // start dev server
-      devServer = execa(binPath, ['--jsx-factory=h'], {
+      devServer = execa(binPath, {
         cwd: tempDir
       })
       await new Promise((resolve) => {
         devServer.stdout.on('data', (data) => {
+          serverLogs.push(data.toString())
           if (data.toString().match('running')) {
+            console.log('dev server running.')
             resolve()
           }
         })
       })
 
+      console.log('launching browser')
       page = await browser.newPage()
-      page.on('console', (msg) => logs.push(msg.text()))
+      page.on('console', (msg) => {
+        browserLogs.push(msg.text())
+      })
       await page.goto('http://localhost:3000')
     })
 
     declareTests(false)
+
+    test('hmr (index.html full-reload)', async () => {
+      expect(await getText('title')).toMatch('Vite App')
+      // hmr
+      const reload = page.waitForNavigation({
+        waitUntil: 'domcontentloaded'
+      })
+      await updateFile('index.html', (content) =>
+        content.replace('Vite App', 'Vite App Test')
+      )
+      await reload
+      await expectByPolling(() => getText('title'), 'Vite App Test')
+    })
+
+    test('hmr (html full-reload)', async () => {
+      await page.goto('http://localhost:3000/test.html')
+      expect(await getText('title')).toMatch('Vite App')
+      // hmr
+      const reload = page.waitForNavigation({
+        waitUntil: 'domcontentloaded'
+      })
+      await updateFile('test.html', (content) =>
+        content.replace('Vite App', 'Vite App Test')
+      )
+      await reload
+      await expectByPolling(() => getText('title'), 'Vite App Test')
+    })
+
+    // Assert that all edited files are reflected on page reload
+    // i.e. service-worker cache is correctly busted
+    test('sw cache busting', async () => {
+      await page.reload()
+
+      expect(await getText('.hmr-increment')).toMatch('>>> count is 1337 <<<')
+      expect(await getText('.hmr-propagation')).toMatch('666')
+      expect(await getComputedColor('.postcss-from-css')).toBe('rgb(0, 128, 0)')
+      expect(await getComputedColor('.postcss-from-sfc')).toBe('rgb(255, 0, 0)')
+      expect(await getComputedColor('.style-scoped')).toBe('rgb(0, 0, 0)')
+      expect(await getComputedColor('.css-modules-sfc')).toBe('rgb(0, 0, 0)')
+      expect(await getComputedColor('.css-modules-import')).toBe('rgb(0, 0, 1)')
+      expect(await getComputedColor('.pug')).toBe('rgb(0, 0, 0)')
+      expect(await getText('.pug')).toMatch('pug with hmr')
+      expect(await getComputedColor('.src-imports-style')).toBe('rgb(0, 0, 0)')
+      expect(await getText('.src-imports-script')).toMatch('bye from')
+      expect(await getText('.src-imports-script')).toMatch('changed')
+      expect(await getText('.jsx-root')).toMatch('2046')
+      expect(await getText('.alias')).toMatch('alias hmr works')
+      expect(await getComputedColor('.transform-scss')).toBe('rgb(0, 0, 0)')
+      expect(await getText('.transform-js')).toMatch('3')
+      expect(await getText('.json')).toMatch('with hmr')
+
+      // ensure import graph is still working
+      await updateFile('testJsonImport.json', (c) =>
+        c.replace('with hmr', 'with sw reload')
+      )
+      await expectByPolling(() => getText('.json'), 'with sw reload')
+    })
   })
 })
 
@@ -332,9 +529,9 @@ async function updateFile(file, replacer) {
 
 // poll until it updates
 async function expectByPolling(poll, expected) {
-  const maxTries = 10
+  const maxTries = 20
   for (let tries = 0; tries < maxTries; tries++) {
-    const actual = await poll()
+    const actual = (await poll()) || ''
     if (actual.indexOf(expected) > -1 || tries === maxTries - 1) {
       expect(actual).toMatch(expected)
       break

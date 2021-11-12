@@ -1,12 +1,11 @@
-import { Plugin, RollupOutput } from 'rollup'
+import { Plugin, RollupOutput, OutputChunk } from 'rollup'
 import path from 'path'
 import fs from 'fs-extra'
 import { isExternalUrl, cleanUrl, isStaticAsset } from '../utils/pathUtils'
-import { resolveVue } from '../utils/resolveVue'
 import { resolveAsset } from './buildPluginAsset'
 import {
-  parse,
-  transform,
+  parse as Parse,
+  transform as Transform,
   NodeTransform,
   NodeTypes,
   TextNode,
@@ -16,13 +15,15 @@ import MagicString from 'magic-string'
 import { InternalResolver } from '../resolver'
 
 export const createBuildHtmlPlugin = async (
+  root: string,
   indexPath: string | null,
   publicBasePath: string,
   assetsDir: string,
   inlineLimit: number,
-  resolver: InternalResolver
+  resolver: InternalResolver,
+  shouldPreload: ((chunk: OutputChunk) => boolean) | null
 ) => {
-  if (!indexPath || !(await fs.pathExists(indexPath))) {
+  if (!indexPath || !fs.existsSync(indexPath)) {
     return {
       renderIndex: (...args: any[]) => '',
       htmlPlugin: null
@@ -31,6 +32,7 @@ export const createBuildHtmlPlugin = async (
 
   const rawHtml = await fs.readFile(indexPath, 'utf-8')
   let { html: processedHtml, js } = await compileHtml(
+    root,
     rawHtml,
     publicBasePath,
     assetsDir,
@@ -71,22 +73,32 @@ export const createBuildHtmlPlugin = async (
     }
   }
 
+  const injectPreload = (html: string, filename: string) => {
+    filename = isExternalUrl(filename)
+      ? filename
+      : `${publicBasePath}${path.posix.join(assetsDir, filename)}`
+    const tag = `<link rel="modulepreload" href="${filename}" />`
+    if (/<\/head>/.test(html)) {
+      return html.replace(/<\/head>/, `${tag}\n</head>`)
+    } else {
+      return tag + '\n' + html
+    }
+  }
+
   const renderIndex = (
-    root: string,
-    cdn: boolean,
-    cssFileName: string,
-    bundleOutput: RollupOutput['output']
+    bundleOutput: RollupOutput['output'],
+    cssFileName: string
   ) => {
     // inject css link
     processedHtml = injectCSS(processedHtml, cssFileName)
-    // if not inlining vue, inject cdn link so it can start the fetch early
-    if (cdn) {
-      processedHtml = injectScript(processedHtml, resolveVue(root).cdnLink)
-    }
     // inject js entry chunks
     for (const chunk of bundleOutput) {
-      if (chunk.type === 'chunk' && chunk.isEntry) {
-        processedHtml = injectScript(processedHtml, chunk.fileName)
+      if (chunk.type === 'chunk') {
+        if (chunk.isEntry) {
+          processedHtml = injectScript(processedHtml, chunk.fileName)
+        } else if (shouldPreload && shouldPreload(chunk)) {
+          processedHtml = injectPreload(processedHtml, chunk.fileName)
+        }
       }
     }
     return processedHtml
@@ -111,27 +123,37 @@ const assetAttrsConfig: Record<string, string[]> = {
 // compile index.html to a JS module, importing referenced assets
 // and scripts
 const compileHtml = async (
+  root: string,
   html: string,
   publicBasePath: string,
   assetsDir: string,
   inlineLimit: number,
   resolver: InternalResolver
 ) => {
-  const ast = parse(html)
+  const { parse, transform } = require('@vue/compiler-dom')
+
+  // @vue/compiler-core doesn't like lowercase doctypes
+  html = html.replace(/<!doctype\s/i, '<!DOCTYPE ')
+  const ast = (parse as typeof Parse)(html)
 
   let js = ''
   const s = new MagicString(html)
   const assetUrls: AttributeNode[] = []
-  const viteHtmlTrasnfrom: NodeTransform = (node, context) => {
+  const viteHtmlTransfrom: NodeTransform = (node) => {
     if (node.type === NodeTypes.ELEMENT) {
       if (node.tag === 'script') {
+        let shouldRemove = true
         const srcAttr = node.props.find(
           (p) => p.type === NodeTypes.ATTRIBUTE && p.name === 'src'
         ) as AttributeNode
         if (srcAttr && srcAttr.value) {
-          // <script type="module" src="..."/>
-          // add it as an import
-          js += `\nimport ${JSON.stringify(srcAttr.value.content)}`
+          if (!isExternalUrl(srcAttr.value.content)) {
+            // <script type="module" src="..."/>
+            // add it as an import
+            js += `\nimport ${JSON.stringify(srcAttr.value.content)}`
+          } else {
+            shouldRemove = false
+          }
         } else if (node.children.length) {
           // <script type="module">...</script>
           // add its content
@@ -140,9 +162,11 @@ const compileHtml = async (
           // it's hard to imagine any reason for anyone to do that.
           js += `\n` + (node.children[0] as TextNode).content.trim() + `\n`
         }
-        // remove the script tag from the html. we are going to inject new
-        // ones in the end.
-        s.remove(node.loc.start.offset, node.loc.end.offset)
+        if (shouldRemove) {
+          // remove the script tag from the html. we are going to inject new
+          // ones in the end.
+          s.remove(node.loc.start.offset, node.loc.end.offset)
+        }
       }
       // For asset references in index.html, also generate an import
       // statement for each - this will be handled by the asset plugin
@@ -166,8 +190,8 @@ const compileHtml = async (
     }
   }
 
-  transform(ast, {
-    nodeTransforms: [viteHtmlTrasnfrom]
+  ;(transform as typeof Transform)(ast, {
+    nodeTransforms: [viteHtmlTransfrom]
   })
 
   // for each encountered asset url, rewrite original html so that it
@@ -176,11 +200,12 @@ const compileHtml = async (
     const value = attr.value!
     const { url } = await resolveAsset(
       resolver.requestToFile(value.content),
+      root,
       publicBasePath,
       assetsDir,
       inlineLimit
     )
-    s.overwrite(value.loc.start.offset, value.loc.end.offset, url)
+    s.overwrite(value.loc.start.offset, value.loc.end.offset, `"${url}"`)
   }
 
   return {

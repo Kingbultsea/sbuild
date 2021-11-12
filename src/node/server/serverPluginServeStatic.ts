@@ -1,9 +1,20 @@
-import { Plugin } from '.'
+import fs from 'fs'
+import path from 'path'
+import { ServerPlugin } from '.'
+import { isStaticAsset } from '../utils'
+import chalk from 'chalk'
 
 const send = require('koa-send')
 const debug = require('debug')('vite:history')
 
-export const serveStaticPlugin: Plugin = ({ root, app, resolver }) => {
+export const seenUrls = new Set()
+
+export const serveStaticPlugin: ServerPlugin = ({
+  root,
+  app,
+  resolver,
+  config
+}) => {
   app.use((ctx, next) => {
     // short circuit requests that have already been explicitly handled
     if (ctx.body || ctx.status !== 404) {
@@ -12,56 +23,76 @@ export const serveStaticPlugin: Plugin = ({ root, app, resolver }) => {
     return next()
   })
 
-  // history API fallback
+  if (!config.serviceWorker) {
+    app.use(async (ctx, next) => {
+      await next()
+      // the first request to the server should never 304
+      if (seenUrls.has(ctx.url) && ctx.fresh) {
+        ctx.status = 304
+      }
+      seenUrls.add(ctx.url)
+    })
+  }
+  app.use(require('koa-etag')())
+
   app.use((ctx, next) => {
-    const cleanUrl = ctx.url.split('?')[0].split('#')[0]
+    if (ctx.path.startsWith('/public/') && isStaticAsset(ctx.path)) {
+      console.error(
+        chalk.yellow(
+          `[vite] files in the public directory are served at the root path.\n` +
+            `  ${chalk.blue(ctx.path)} should be changed to ${chalk.blue(
+              ctx.path.replace(/^\/public\//, '/')
+            )}.`
+        )
+      )
+    }
+    const filePath = resolver.requestToFile(ctx.path)
+    if (
+      filePath !== ctx.path &&
+      fs.existsSync(filePath) &&
+      fs.statSync(filePath).isFile()
+    ) {
+      return send(ctx, filePath, { root: '/' })
+    }
+    return next()
+  })
+  app.use(require('koa-static')(root))
+  app.use(require('koa-static')(path.join(root, 'public')))
+
+  // history API fallback
+  app.use(async (ctx, next) => {
+    if (ctx.status !== 404) {
+      return next()
+    }
+
     if (ctx.method !== 'GET') {
       debug(`not redirecting ${ctx.url} (not GET)`)
       return next()
     }
 
-    if (cleanUrl.includes('.')) {
-      debug(`not redirecting ${ctx.url} (relative url)`)
-      return next()
-    }
-
-    if (!ctx.headers || typeof ctx.headers.accept !== 'string') {
+    const accept = ctx.headers && ctx.headers.accept
+    if (typeof accept !== 'string') {
       debug(`not redirecting ${ctx.url} (no headers.accept)`)
       return next()
     }
 
-    if (ctx.headers.accept.includes('application/json')) {
+    if (accept.includes('application/json')) {
       debug(`not redirecting ${ctx.url} (json)`)
       return next()
     }
 
-    if (
-      !(
-        ctx.headers.accept.includes('text/html') ||
-        ctx.headers.accept.includes('*/*')
-      )
-    ) {
+    if (!accept.includes('text/html')) {
       debug(`not redirecting ${ctx.url} (not accepting html)`)
       return next()
     }
 
     debug(`redirecting ${ctx.url} to /index.html`)
-    ctx.url = '/index.html'
-    return next()
-  })
-
-  app.use(require('koa-conditional-get')())
-  app.use(require('koa-etag')())
-
-  app.use((ctx, next) => {
-    const redirect = resolver.requestToFile(ctx.path)
-    if (!redirect.startsWith(root)) {
-      // resolver resolved to a file that is outside of project root,
-      // manually send here
-      return send(ctx, redirect, { root: '/' })
+    try {
+      await send(ctx, `index.html`, { root })
+    } catch (e) {
+      ctx.url = '/index.html'
+      ctx.status = 404
+      return next()
     }
-    return next()
   })
-
-  app.use(require('koa-static')(root))
 }

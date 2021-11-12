@@ -31,7 +31,9 @@ jobs:
       - run: rm -rf ~/project/node_modules/esbuild/.install
       - *install_deps
       - *save_cache
+      - run: yarn build
       - run: yarn test
+      - run: yarn test-sw
 
 workflows:
   version: 2

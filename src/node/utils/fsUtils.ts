@@ -3,6 +3,7 @@ import fs from 'fs-extra'
 import LRUCache from 'lru-cache'
 import { Context } from 'koa'
 import { Readable } from 'stream'
+import { seenUrls } from '../server/serverPluginServeStatic'
 
 const getETag = require('etag')
 
@@ -18,7 +19,7 @@ const moduleReadCache = new LRUCache<string, CacheEntry>({
 
 /**
  * Read a file with in-memory cache.
- * Also sets approrpriate headers and body on the Koa context.
+ * Also sets appropriate headers and body on the Koa context.
  */
 export async function cachedRead(
   ctx: Context | null,
@@ -28,16 +29,20 @@ export async function cachedRead(
   const cached = moduleReadCache.get(file)
   if (ctx) {
     ctx.set('Cache-Control', 'no-cache')
-    ctx.type = path.basename(file)
+    ctx.type = path.extname(file) || 'js'
   }
   if (cached && cached.lastModified === lastModified) {
     if (ctx) {
       ctx.etag = cached.etag
       ctx.lastModified = new Date(cached.lastModified)
-      if (ctx.get('If-None-Match') === ctx.etag) {
+      if (
+        ctx.__serviceWorker !== true &&
+        ctx.get('If-None-Match') === ctx.etag &&
+        seenUrls.has(ctx.url)
+      ) {
         ctx.status = 304
       }
-      // still set the content for *.vue requests
+      seenUrls.add(ctx.url)
       ctx.body = cached.content
     }
     return cached.content
@@ -77,5 +82,22 @@ export async function readBody(
     })
   } else {
     return !stream || typeof stream === 'string' ? stream : stream.toString()
+  }
+}
+
+export function lookupFile(
+  dir: string,
+  formats: string[],
+  pathOnly = false
+): string | undefined {
+  for (const format of formats) {
+    const fullPath = path.join(dir, format)
+    if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+      return pathOnly ? fullPath : fs.readFileSync(fullPath, 'utf-8')
+    }
+  }
+  const parentDir = path.dirname(dir)
+  if (parentDir !== dir) {
+    return lookupFile(parentDir, formats, pathOnly)
   }
 }
